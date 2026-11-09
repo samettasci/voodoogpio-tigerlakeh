@@ -14,6 +14,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Checkout MacKernelSDK
+        uses: actions/checkout@v4
+        with:
+          repository: acidanthera/MacKernelSDK
+          path: MacKernelSDK
+
       - name: Show Build Environment
         shell: bash
         run: |
