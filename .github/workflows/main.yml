@@ -1,0 +1,46 @@
+name: Build VoodooGPIO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project VoodooGPIO.xcodeproj
+
+      - name: Build Release
+        run: |
+          xcodebuild \
+            -project VoodooGPIO.xcodeproj \
+            -configuration Release \
+            -scheme VoodooGPIO \
+            -derivedDataPath "$RUNNER_TEMP/build" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Verify Tiger Lake-H
+        run: |
+          BIN=$(find "$RUNNER_TEMP/build" -type f -path "*/VoodooGPIO.kext/Contents/MacOS/VoodooGPIO" | head -n 1)
+          test -n "$BIN"
+          nm "$BIN" | grep 'VoodooGPIOTigerLakeH'
+          file "$BIN"
+
+      - name: Package
+        run: |
+          find "$RUNNER_TEMP/build" -name VoodooGPIO.kext -type d \
+            -exec ditto -c -k --keepParent {} "$RUNNER_TEMP/VoodooGPIO.zip" \;
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoodooGPIO-TigerLakeH
+          path: ${{ runner.temp }}/VoodooGPIO.zip
+          if-no-files-found: error
