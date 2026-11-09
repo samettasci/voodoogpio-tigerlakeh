@@ -1,25 +1,46 @@
-name: Build VoodooGPIO
+name: Build VoodooGPIO TigerLake-H
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build VoodooGPIO
     runs-on: macos-15
 
     steps:
-      - name: Checkout
+      - name: Checkout Source
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Show Xcode
+      - name: Show Build Environment
+        shell: bash
         run: |
+          echo "===== XCODE ====="
           xcodebuild -version
-          xcodebuild -list -project VoodooGPIO.xcodeproj
 
-      - - name: Build Release
+          echo "===== COMPILER ====="
+          clang++ --version
+
+          echo "===== PROJECT TARGETS ====="
+          xcodebuild -list \
+            -project VoodooGPIO.xcodeproj
+
+          echo "===== TIGER LAKE-H SOURCE ====="
+          test -f VoodooGPIO/TigerLake-H/VoodooGPIOTigerLakeH.cpp
+          test -f VoodooGPIO/TigerLake-H/VoodooGPIOTigerLakeH.hpp
+
+          echo "===== INT34C6 MATCH ====="
+          grep -n -B 10 -A 5 \
+            'INT34C6' VoodooGPIO/Info.plist
+
+      - name: Build Release
         shell: bash
         run: |
           set -o pipefail
+
+          echo "===== START BUILD ====="
 
           xcodebuild \
             -project VoodooGPIO.xcodeproj \
@@ -32,34 +53,93 @@ jobs:
             MACOSX_DEPLOYMENT_TARGET=10.13 \
             CODE_SIGNING_ALLOWED=NO \
             build > "$RUNNER_TEMP/build.log" 2>&1 || {
-              echo "===== GERCEK DERLEME HATALARI ====="
+              echo "===== COMPILER ERRORS ====="
+
               grep -n -B 5 -A 12 -E \
                 'error:|fatal error:|BUILD FAILED' \
-                "$RUNNER_TEMP/build.log" | head -n 180 || true
+                "$RUNNER_TEMP/build.log" \
+                | head -n 250 || true
 
-              echo "===== SON 60 SATIR ====="
-              tail -n 60 "$RUNNER_TEMP/build.log"
+              echo "===== LAST 100 LOG LINES ====="
+              tail -n 100 "$RUNNER_TEMP/build.log"
+
               exit 1
             }
 
-          echo "===== BUILD SUCCESS ====="
-          tail -n 10 "$RUNNER_TEMP/build.log"
+          echo "===== BUILD SUCCEEDED ====="
+          tail -n 20 "$RUNNER_TEMP/build.log"
+
+      - name: Locate Built Kext
+        shell: bash
+        run: |
+          KEXT=$(find "$RUNNER_TEMP/build" \
+            -type d -name VoodooGPIO.kext \
+            | head -n 1)
+
+          if [ -z "$KEXT" ]; then
+            echo "ERROR: VoodooGPIO.kext not found"
+            exit 1
+          fi
+
+          echo "KEXT_PATH=$KEXT" >> "$GITHUB_ENV"
+
+          echo "===== KEXT LOCATION ====="
+          echo "$KEXT"
+
+          echo "===== KEXT CONTENTS ====="
+          ls -la "$KEXT/Contents"
 
       - name: Verify Tiger Lake-H
+        shell: bash
         run: |
-          BIN=$(find "$RUNNER_TEMP/build" -type f -path "*/VoodooGPIO.kext/Contents/MacOS/VoodooGPIO" | head -n 1)
-          test -n "$BIN"
-          nm "$BIN" | grep 'VoodooGPIOTigerLakeH'
-          file "$BIN"
+          BIN="$KEXT_PATH/Contents/MacOS/VoodooGPIO"
+          PLIST="$KEXT_PATH/Contents/Info.plist"
 
-      - name: Package
+          echo "===== ARCHITECTURE ====="
+          file "$BIN"
+          lipo -archs "$BIN"
+
+          echo "===== TIGER LAKE-H CLASS ====="
+          nm "$BIN" | grep \
+            'VoodooGPIOTigerLakeH' \
+            || {
+              echo "ERROR: Tiger Lake-H class missing"
+              exit 1
+            }
+
+          echo "===== INT34C6 MATCH ====="
+          /usr/libexec/PlistBuddy \
+            -c 'Print :IOKitPersonalities:VoodooGPIOTigerLakeH' \
+            "$PLIST"
+
+          echo "===== PLIST VALIDATION ====="
+          plutil -lint "$PLIST"
+
+      - name: Package Kext
+        shell: bash
         run: |
-          find "$RUNNER_TEMP/build" -name VoodooGPIO.kext -type d \
-            -exec ditto -c -k --keepParent {} "$RUNNER_TEMP/VoodooGPIO.zip" \;
+          mkdir -p "$RUNNER_TEMP/output"
+
+          ditto -c -k --keepParent \
+            "$KEXT_PATH" \
+            "$RUNNER_TEMP/output/VoodooGPIO-TigerLakeH.zip"
+
+          echo "===== PACKAGE ====="
+          ls -lh "$RUNNER_TEMP/output"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VoodooGPIO-TigerLakeH
-          path: ${{ runner.temp }}/VoodooGPIO.zip
+          name: VoodooGPIO-TigerLakeH-x86_64
+          path: ${{ runner.temp }}/output/VoodooGPIO-TigerLakeH.zip
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Build Log On Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoodooGPIO-Build-Logs
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+          retention-days: 7
