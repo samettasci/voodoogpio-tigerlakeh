@@ -5,7 +5,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    name: Build Intel x86_64 Kext
+    runs-on: macos-15-intel
 
     steps:
       - name: Checkout Source
@@ -19,28 +20,32 @@ jobs:
           repository: acidanthera/MacKernelSDK
           path: MacKernelSDK
 
-      - name: Verify SDK
+      - name: Verify Environment
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "===== HOST ====="
+          uname -m
+
           echo "===== XCODE ====="
           xcodebuild -version
 
-          echo "===== SDK LOCATION ====="
-          pwd
-          find MacKernelSDK -name IOLib.h -print
-
-          echo "===== REQUIRED HEADER ====="
+          echo "===== SDK ====="
           test -f MacKernelSDK/Headers/IOKit/IOLib.h
 
-          echo "===== HEADER CHECK ====="
+          echo "===== INTEL HEADER TEST ====="
           printf '#include <IOKit/IOLib.h>\n' \
-            | clang++ -x c++ -E \
-                -I "$PWD/MacKernelSDK/Headers" \
+            | clang++ \
+                -arch x86_64 \
+                -D__KERNEL__ \
+                -DKERNEL \
+                -x c++ \
+                -E \
+                -I "$GITHUB_WORKSPACE/MacKernelSDK/Headers" \
                 - >/dev/null
 
-          echo "SDK HEADER CHECK PASSED"
+          echo "HEADER TEST PASSED"
 
       - name: Build Release
         shell: bash
@@ -49,11 +54,6 @@ jobs:
 
           HEADERS="$GITHUB_WORKSPACE/MacKernelSDK/Headers"
           LIBS="$GITHUB_WORKSPACE/MacKernelSDK/Library/x86_64"
-
-          echo "===== SDK HEADERS ====="
-          echo "$HEADERS"
-
-          echo "===== START BUILD ====="
 
           xcodebuild \
             -project VoodooGPIO.xcodeproj \
@@ -68,25 +68,24 @@ jobs:
             HEADER_SEARCH_PATHS="$HEADERS" \
             USER_HEADER_SEARCH_PATHS="$HEADERS" \
             SYSTEM_HEADER_SEARCH_PATHS="$HEADERS" \
-            OTHER_CFLAGS="-I$HEADERS" \
-            OTHER_CPLUSPLUSFLAGS="-I$HEADERS" \
+            OTHER_CFLAGS="-I$HEADERS -D__KERNEL__ -DKERNEL" \
+            OTHER_CPLUSPLUSFLAGS="-I$HEADERS -D__KERNEL__ -DKERNEL" \
             LIBRARY_SEARCH_PATHS="$LIBS" \
             build > "$RUNNER_TEMP/build.log" 2>&1
 
           RESULT=$?
 
-          echo "===== ACTUAL ERRORS ====="
+          echo "===== COMPILER ERRORS ====="
           grep -n -B 4 -A 10 -E \
             'error:|fatal error:|BUILD FAILED' \
-            "$RUNNER_TEMP/build.log" \
-            | head -n 200 || true
+            "$RUNNER_TEMP/build.log" | head -n 200 || true
 
-          echo "===== FINAL LOG ====="
-          tail -n 50 "$RUNNER_TEMP/build.log"
+          echo "===== BUILD RESULT ====="
+          tail -n 60 "$RUNNER_TEMP/build.log"
 
           exit "$RESULT"
 
-      - name: Verify Binary
+      - name: Verify Tiger Lake-H
         shell: bash
         run: |
           set -euo pipefail
@@ -103,15 +102,21 @@ jobs:
           echo "===== TIGER LAKE-H CLASS ====="
           nm "$BIN" | grep 'VoodooGPIOTigerLakeH'
 
-          echo "===== INT34C6 ====="
+          echo "===== INT34C6 MATCH ====="
           /usr/libexec/PlistBuddy \
             -c 'Print :IOKitPersonalities:VoodooGPIOTigerLakeH' \
             "$PLIST" | grep 'INT34C6'
 
-          echo "===== PLIST ====="
+          echo "===== PLIST VALIDATION ====="
           plutil -lint "$PLIST"
 
-          echo "===== PACKAGE ====="
+      - name: Package Kext
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEXT="$RUNNER_TEMP/build/Build/Products/Release/VoodooGPIO.kext"
+
           mkdir -p "$RUNNER_TEMP/output"
 
           ditto -c -k --keepParent \
@@ -132,3 +137,4 @@ jobs:
           name: VoodooGPIO-Build-Logs
           path: ${{ runner.temp }}/build.log
           if-no-files-found: ignore
+          retention-days: 7
