@@ -5,11 +5,10 @@ on:
 
 jobs:
   build:
-    name: Build VoodooGPIO
     runs-on: macos-15
 
     steps:
-      - name: Checkout VoodooGPIO
+      - name: Checkout Source
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -20,38 +19,39 @@ jobs:
           repository: acidanthera/MacKernelSDK
           path: MacKernelSDK
 
-      - name: Check Environment
+      - name: Verify SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "===== XCODE ====="
           xcodebuild -version
 
-          echo "===== SDK ====="
-          xcodebuild -showsdks
+          echo "===== SDK LOCATION ====="
+          pwd
+          find MacKernelSDK -name IOLib.h -print
 
-          echo "===== KERNEL HEADERS ====="
+          echo "===== REQUIRED HEADER ====="
           test -f MacKernelSDK/Headers/IOKit/IOLib.h
-          ls -l MacKernelSDK/Headers/IOKit/IOLib.h
 
-          echo "===== KMOD LIBRARY ====="
-          test -f MacKernelSDK/Library/x86_64/libkmod.a
+          echo "===== HEADER CHECK ====="
+          printf '#include <IOKit/IOLib.h>\n' \
+            | clang++ -x c++ -E \
+                -I "$PWD/MacKernelSDK/Headers" \
+                - >/dev/null
 
-          echo "===== TIGER LAKE-H ====="
-          test -f VoodooGPIO/TigerLake-H/VoodooGPIOTigerLakeH.cpp
-
-          echo "===== PROJECT ====="
-          xcodebuild -list -project VoodooGPIO.xcodeproj
+          echo "SDK HEADER CHECK PASSED"
 
       - name: Build Release
-        id: compile
         shell: bash
         run: |
-          set -o pipefail
+          set -uo pipefail
 
-          SDK_HEADERS="$GITHUB_WORKSPACE/MacKernelSDK/Headers"
-          SDK_LIB="$GITHUB_WORKSPACE/MacKernelSDK/Library/x86_64"
+          HEADERS="$GITHUB_WORKSPACE/MacKernelSDK/Headers"
+          LIBS="$GITHUB_WORKSPACE/MacKernelSDK/Library/x86_64"
+
+          echo "===== SDK HEADERS ====="
+          echo "$HEADERS"
 
           echo "===== START BUILD ====="
 
@@ -65,100 +65,70 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             MACOSX_DEPLOYMENT_TARGET=10.13 \
             CODE_SIGNING_ALLOWED=NO \
-            KERNEL_EXTENSION_HEADER_SEARCH_PATHS="$SDK_HEADERS" \
-            KERNEL_FRAMEWORK_HEADERS="$SDK_HEADERS" \
-            HEADER_SEARCH_PATHS="$SDK_HEADERS" \
-            LIBRARY_SEARCH_PATHS="$SDK_LIB" \
+            HEADER_SEARCH_PATHS="$HEADERS" \
+            USER_HEADER_SEARCH_PATHS="$HEADERS" \
+            SYSTEM_HEADER_SEARCH_PATHS="$HEADERS" \
+            OTHER_CFLAGS="-I$HEADERS" \
+            OTHER_CPLUSPLUSFLAGS="-I$HEADERS" \
+            LIBRARY_SEARCH_PATHS="$LIBS" \
             build > "$RUNNER_TEMP/build.log" 2>&1
 
           RESULT=$?
 
-          echo "===== COMPILER ERRORS ====="
-          grep -n -B 5 -A 12 -E \
+          echo "===== ACTUAL ERRORS ====="
+          grep -n -B 4 -A 10 -E \
             'error:|fatal error:|BUILD FAILED' \
             "$RUNNER_TEMP/build.log" \
-            | head -n 250 || true
+            | head -n 200 || true
 
-          echo "===== BUILD LOG TAIL ====="
-          tail -n 80 "$RUNNER_TEMP/build.log"
+          echo "===== FINAL LOG ====="
+          tail -n 50 "$RUNNER_TEMP/build.log"
 
           exit "$RESULT"
 
-      - name: Locate Kext
-        if: success()
+      - name: Verify Binary
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          KEXT=$(find "$RUNNER_TEMP/build/Build/Products/Release" \
-            -type d -name VoodooGPIO.kext \
-            | head -n 1)
+          KEXT="$RUNNER_TEMP/build/Build/Products/Release/VoodooGPIO.kext"
+          BIN="$KEXT/Contents/MacOS/VoodooGPIO"
+          PLIST="$KEXT/Contents/Info.plist"
 
-          test -n "$KEXT"
-          test -f "$KEXT/Contents/MacOS/VoodooGPIO"
+          test -f "$BIN"
 
-          echo "KEXT_PATH=$KEXT" >> "$GITHUB_ENV"
-
-          echo "===== KEXT FOUND ====="
-          echo "$KEXT"
-
-      - name: Verify Tiger Lake-H
-        if: success()
-        shell: bash
-        run: |
-          set -e
-
-          BIN="$KEXT_PATH/Contents/MacOS/VoodooGPIO"
-          PLIST="$KEXT_PATH/Contents/Info.plist"
-
-          echo "===== BINARY ARCH ====="
-          file "$BIN"
-          lipo -archs "$BIN"
+          echo "===== ARCHITECTURE ====="
+          lipo -archs "$BIN" | grep -w x86_64
 
           echo "===== TIGER LAKE-H CLASS ====="
-          nm "$BIN" | grep -q 'VoodooGPIOTigerLakeH'
+          nm "$BIN" | grep 'VoodooGPIOTigerLakeH'
 
-          echo "===== CLASS STRING ====="
-          strings "$BIN" | grep 'VoodooGPIOTigerLakeH'
-
-          echo "===== INT34C6 PERSONALITY ====="
+          echo "===== INT34C6 ====="
           /usr/libexec/PlistBuddy \
             -c 'Print :IOKitPersonalities:VoodooGPIOTigerLakeH' \
-            "$PLIST"
+            "$PLIST" | grep 'INT34C6'
 
-          echo "===== PLIST VALIDATION ====="
+          echo "===== PLIST ====="
           plutil -lint "$PLIST"
 
-          echo "===== VERIFICATION PASSED ====="
-
-      - name: Package Kext
-        if: success()
-        shell: bash
-        run: |
-          set -e
-
+          echo "===== PACKAGE ====="
           mkdir -p "$RUNNER_TEMP/output"
 
           ditto -c -k --keepParent \
-            "$KEXT_PATH" \
+            "$KEXT" \
             "$RUNNER_TEMP/output/VoodooGPIO-TigerLakeH.zip"
 
-          ls -lh "$RUNNER_TEMP/output"
-
-      - name: Upload Kext Artifact
-        if: success()
+      - name: Upload Kext
         uses: actions/upload-artifact@v4
         with:
           name: VoodooGPIO-TigerLakeH-x86_64
           path: ${{ runner.temp }}/output/VoodooGPIO-TigerLakeH.zip
           if-no-files-found: error
-          retention-days: 30
 
-      - name: Upload Full Build Log
+      - name: Upload Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: VoodooGPIO-Full-Build-Log
+          name: VoodooGPIO-Build-Logs
           path: ${{ runner.temp }}/build.log
           if-no-files-found: ignore
-          retention-days: 7
